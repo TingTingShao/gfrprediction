@@ -1,0 +1,275 @@
+from gfrCalculator import GfrCalculator
+import os
+import config
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestRegressor
+from metrics import Evaluation
+from sklearn.linear_model import LinearRegression
+from sklearn import linear_model
+from sklearn.model_selection import GridSearchCV
+import xgboost as xgb
+from sklearn import svm
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.neural_network import MLPRegressor
+from functools import reduce
+from numpy import mean
+import pickle
+from metrics import Evaluation
+from sklearn.feature_selection import SequentialFeatureSelector
+from sklearn.base import clone
+from passingBablokRegression import PassingBablok
+# from pyCompare._plotBlandAltman import blandAltman
+from multiprocessing import Pool
+from metrics import Evaluation
+import config
+import os
+import pandas as pd
+pbplot=PassingBablok()
+
+# For this script, use equations as features in rf full
+# evaluation will be done within age range 2-25
+# to enable fair comparison, complete cases 
+
+eval = Evaluation()
+rule all: 
+    input:
+        data_dic=os.path.join(config.ANALYSIS_PATH, "model_data.pkl"),
+        rf_results_ext=os.path.join(config.ANALYSIS_PATH, "rf_results_ext.csv"),
+        results=os.path.join(config.ANALYSIS_PATH, "data25_gfrcal_pred.csv"), 
+        rf_models_selected=os.path.join(config.ANALYSIS_PATH, "rf_models_selected.pkl"),
+        plot_out=os.path.join(config.TEMP_PATH, "plots.done"),
+
+# patients with missing values removed
+# prepare training data, one for all ages, and one for age range 2-25, validation dataset is between 2-25
+rule prepare_data:
+    input:
+        data = os.path.join(config.ANALYSIS_PATH, "data25_gfrcal.csv"),
+        data_full=os.path.join(config.ANALYSIS_PATH, "data_gfrcal.csv"),
+    output:
+        data_dic=os.path.join(config.ANALYSIS_PATH, "model_data.pkl"),
+    run:
+        data= pd.read_csv(input.data)
+        data_full= pd.read_csv(input.data_full)
+        data = pd.get_dummies(data, columns=['SEX'], drop_first=True)
+        data_full = pd.get_dummies(data_full, columns=['SEX'], drop_first=True)
+        # print(data.columns)
+        # print(data_all.columns)
+        data=data.dropna(subset=config.FEATURES_USED)
+        data_all=data_full.dropna(subset=config.FEATURES_USED)
+        development = data[data['dataset'].isin (['dev', 'int_val'])]
+        development_full=data_full[data_full['dataset'].isin (['dev', 'int_val'])]
+        ext_val=data[data['dataset'] == 'ext_val']
+
+        X_dev_combi = development[config.FEATURES_ENGINEERED]
+        y_dev_combi = development[config.LABEL]
+        X_dev_combi_full = development_full[config.FEATURES_ENGINEERED]
+        y_dev_combi_full = development_full[config.LABEL]
+
+        X_ext_val_combi = ext_val[config.FEATURES_ENGINEERED]
+        y_ext_val_combi = ext_val[config.LABEL]
+
+        baselines=['EKFCcombi', 'CKiDU25combi', 'FAScombi', 'FAScombiHt', 'Avg_equations']
+
+        y_ext_baseline_combi= ext_val[baselines]
+
+        model_data={
+            'X_dev': X_dev_combi,
+            'y_dev': y_dev_combi,
+            'X_dev_full': X_dev_combi_full,
+            'y_dev_full': y_dev_combi_full,
+            'X_ext_val': X_ext_val_combi,
+            'y_ext_val': y_ext_val_combi,
+            'y_ext_baseline': y_ext_baseline_combi
+        }
+
+        pickle.dump(model_data, open(output.data_dic, 'wb'))
+
+
+rule train_models:
+    input:
+        data_dic=os.path.join(config.ANALYSIS_PATH, "model_data.pkl"),
+    output:
+        rf_models=os.path.join(config.ANALYSIS_PATH, "rf_models.pkl"),
+    run:
+        rf_model_data = pickle.load(open(input.data_dic, "rb"))
+
+        def run_models(dict):
+            X_dev = dict['X_dev']
+            y_dev = dict['y_dev']
+            X_dev_full = dict['X_dev_full']
+            y_dev_full = dict['y_dev_full']
+            print(X_dev_full.columns)
+            print(X_dev.columns)
+            template=RandomForestRegressor(random_state=0)
+            rf=clone(template)
+            rf.fit(X_dev, y_dev)
+
+            rf_full=RandomForestRegressor(random_state=0)
+            rf_full.fit(X_dev_full, y_dev_full)
+            
+            rf_back=clone(template)
+            sfs_back = SequentialFeatureSelector(rf_back, direction='backward', cv=5, n_jobs=-1)
+            sfs_back.fit(X_dev_full, y_dev_full)
+            print(sfs_back.get_feature_names_out())
+            rf_forward=clone(template)
+            sfs_forward = SequentialFeatureSelector(rf_forward, direction='forward', cv=5, n_jobs=-1)
+            sfs_forward.fit(X_dev_full, y_dev_full)
+            print(sfs_forward.get_feature_names_out())
+            models = {
+                'rf': rf,
+                'rf_all': rf_full,
+                'sfs_back': sfs_back,
+                'sfs_forward': sfs_forward
+            }
+
+            return models
+
+        rf_models = run_models(rf_model_data)
+        pickle.dump(rf_models, open(output.rf_models, 'wb'))
+
+rule train_models_selected:
+    input:
+        data_dic=os.path.join(config.ANALYSIS_PATH, "model_data.pkl"),
+        rf_models=os.path.join(config.ANALYSIS_PATH, "rf_models.pkl"),
+    output:
+        rf_models_selected=os.path.join(config.ANALYSIS_PATH, "rf_models_selected.pkl"),
+    run:
+        rf_models = pickle.load(open(input.rf_models, 'rb'))
+        sfs_back = rf_models['sfs_back']
+        sfs_forward = rf_models['sfs_forward']
+        data_dict = pickle.load(open(input.data_dic, 'rb'))
+        X_dev_full = data_dict['X_dev_full']
+        y_dev_full = data_dict['y_dev_full']
+        template=RandomForestRegressor(random_state=0)
+        # additional fitting: the 3rd set of engineered features 
+        #  step wise feature selection models 
+        rf=clone(template)
+        rf_back=clone(template)
+        rf_forward=clone(template)
+        rf_EKFCcombi=clone(template)
+        rf_only_EKFCcombi=clone(template)
+        rf_back.fit(sfs_back.transform(X_dev_full), y_dev_full)
+        rf_forward.fit(sfs_forward.transform(X_dev_full), y_dev_full)
+        rf.fit(X_dev_full[config.FEATURES_ENGINEERED3], y_dev_full)
+        rf_EKFCcombi.fit(X_dev_full[config.FEATURES_ENGINEERED4], y_dev_full)
+        rf_only_EKFCcombi.fit(X_dev_full[['EKFCcombi']], y_dev_full)
+
+        models_selected={
+            'rf': rf,
+            'rf_back': rf_back,
+            'rf_forward': rf_forward,
+            'rf_EKFCcombi': rf_EKFCcombi,
+            'rf_only_EKFCcombi': rf_only_EKFCcombi
+        }
+
+        pickle.dump(models_selected, open(output.rf_models_selected, 'wb'))
+
+
+rule validate_models:
+    input:
+        data_dic=os.path.join(config.ANALYSIS_PATH_, "model_data.pkl"),
+        rf_models=os.path.join(config.ANALYSIS_PATH, "rf_models.pkl"),
+        rf_models_selected=os.path.join(config.ANALYSIS_PATH, "rf_models_selected.pkl"),
+    output:
+        rf_results_ext=os.path.join(config.ANALYSIS_PATH, "rf_results_ext.csv"),
+    run:
+        rf_model_data = pickle.load(open(input.data_dic, "rb"))
+        rf_models = pickle.load(open(input.rf_models, "rb"))
+        rf_models_selected = pickle.load(open(input.rf_models_selected, "rb"))
+        def validate(data_dict, models_dict, data):
+            # data: data options: internal, external
+            X_val = data_dict['X_ext_val']
+            y_val = data_dict['y_ext_val']
+            y_base_line = data_dict['y_ext_baseline']
+            # print(f"y_val: {y_val.isna().sum()}")
+            rf=models_dict['rf']
+            rf_full=models_dict['rf_all']
+            sfs_back=models_dict['sfs_back']
+            sfs_forward=models_dict['sfs_forward']
+            rf_manual_selected=rf_models_selected['rf']
+            rf_back=rf_models_selected['rf_back']
+            rf_forward=rf_models_selected['rf_forward']
+            rf_EKFCcombi=rf_models_selected['rf_EKFCcombi']
+            rf_only_EKFCcombi=rf_models_selected['rf_only_EKFCcombi']
+
+            # get the predictions
+            rf_pred=rf.predict(X_val)
+            rf_full_pred=rf_full.predict(X_val)
+            rf_pred_forward=rf_forward.predict(sfs_forward.transform(X_val))
+            rf_pred_back=rf_back.predict(sfs_back.transform(X_val))
+            rf_pred_manual_selected=rf_manual_selected.predict(X_val[config.FEATURES_ENGINEERED3])
+            rf_pred_EKFCcombi=rf_EKFCcombi.predict(X_val[config.FEATURES_ENGINEERED4])
+            rf_pred_only_EKFCcombi=rf_only_EKFCcombi.predict(X_val[['EKFCcombi']])
+
+            # even there is no nan values, if indexes not match, substraction can be nan
+            y_val=y_val.reset_index(drop=True)
+            # get the baseline calculations
+
+            EKFC_Combi_cal=y_base_line['EKFCcombi'].reset_index(drop=True)
+            EKFC_Combi_results=eval.evaluate(EKFC_Combi_cal, y_val).rename(f'EKFC_Combi_{data}')
+            # CKiDU25combi_cal=y_base_line['CKiDU25combi'].reset_index(drop=True)
+            # CKiDU25combi_results=eval.evaluate(CKiDU25combi_cal, y_val).rename(f'CKiDU25combi_{data}')
+            Avg_equations_cal=y_base_line['Avg_equations'].reset_index(drop=True)
+            Avg_equations_results=eval.evaluate(Avg_equations_cal, y_val).rename(f'Avg_equations_{data}')
+
+            rf_results=eval.evaluate(rf_pred, y_val).rename(f'rf_{data}')
+            rf_full_results=eval.evaluate(rf_full_pred, y_val).rename(f'rf_full_{data}')
+            rf_results_forward=eval.evaluate(rf_pred_forward, y_val).rename(f'rf_forward_{data}')
+            rf_results_back=eval.evaluate(rf_pred_back, y_val).rename(f'rf_backward_{data}')
+            rf_results_manual_selected=eval.evaluate(rf_pred_manual_selected, y_val).rename(f'rf_manual_selected_{data}')
+            rf_results_EKFCcombi=eval.evaluate(rf_pred_EKFCcombi, y_val).rename(f'rf_EKFCcombi_{data}')
+            rf_results_only_EKFCcombi=eval.evaluate(rf_pred_only_EKFCcombi, y_val).rename(f'rf_only_EKFCcombi_{data}')
+            results=pd.concat([rf_results, rf_full_results, rf_results_forward, rf_results_manual_selected, rf_results_EKFCcombi, rf_results_back, EKFC_Combi_results, Avg_equations_results, rf_results_only_EKFCcombi], axis=1)
+            return results
+
+        rf_results_ext=validate(rf_model_data, rf_models, 'external')
+        rf_results_ext.to_csv(output.rf_results_ext)
+
+rule get_predictions:
+    input:
+        data = os.path.join(config.ANALYSIS_PATH, "data25_calulations_predictions.csv"),
+        rf_models=os.path.join(config.ANALYSIS_PATH, "rf_models.pkl"),
+        rf_models_selected=os.path.join(config.ANALYSIS_PATH, "rf_models_selected.pkl"),
+    output:
+        results=os.path.join(config.ANALYSIS_PATH, "data25_gfrcal_pred.csv"),
+    run:
+        data= pd.read_csv(input.data)
+        # data = pd.get_dummies(data, columns=['SEX'], drop_first=True)
+        rf_models = pickle.load(open(input.rf_models, "rb"))
+        rf_models_selected = pickle.load(open(input.rf_models_selected, "rb"))
+        rf=rf_models['rf']
+        rf_full=rf_models['rf_all']
+        sfs_back=rf_models['sfs_back']
+        sfs_forward=rf_models['sfs_forward']
+        rf_back=rf_models_selected['rf_back']
+        rf_forward=rf_models_selected['rf_forward']
+        rf_maunal_selected=rf_models_selected['rf']
+        rf_EKFCcombi=rf_models_selected['rf_EKFCcombi']
+        rf_only_EKFCcombi=rf_models_selected['rf_only_EKFCcombi']
+        X=data[config.FEATURES_ENGINEERED]
+        print(X.columns)
+        complete_mask=X.notna().all(axis=1)
+        data.loc[complete_mask, 'rf_equations'] = rf.predict(X.loc[complete_mask])
+        data.loc[complete_mask, 'rf_equations_full'] = rf_full.predict(X.loc[complete_mask])
+        data.loc[complete_mask, 'rf_equations_forward'] = rf_forward.predict(X.loc[complete_mask, sfs_forward.get_feature_names_out()])
+        data.loc[complete_mask, 'rf_equations_backward'] = rf_back.predict(X.loc[complete_mask, sfs_back.get_feature_names_out()])
+        data.loc[complete_mask, 'rf_equations_manual_selected'] = rf_maunal_selected.predict(X.loc[complete_mask, config.FEATURES_ENGINEERED3])
+        data.loc[complete_mask, 'rf_equations_EKFCcombi'] = rf_EKFCcombi.predict(X.loc[complete_mask, config.FEATURES_ENGINEERED4])
+        data.loc[complete_mask, 'rf_equations_only_EKFCcombi'] = rf_only_EKFCcombi.predict(X.loc[complete_mask, ['EKFCcombi']])
+        data.to_csv(output.results, index=False)
+
+
+rule generate_plots:
+    input: 
+        results=os.path.join(config.ANALYSIS_PATH, "data25_gfrcal_pred.csv"),
+        data=os.path.join(config.DATA_PATH, "data.csv")
+    output:
+        touch(os.path.join(config.TEMP_PATH, "plots.done"))
+    shell:
+        '''
+        python make_plots.py
+        '''
+
+
+

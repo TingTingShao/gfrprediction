@@ -1,0 +1,691 @@
+from gfrCalculator import GfrCalculator
+import os
+import config
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestRegressor
+from metrics import Evaluation
+from sklearn.linear_model import LinearRegression
+from sklearn import linear_model
+from sklearn.model_selection import GridSearchCV
+import xgboost as xgb
+from sklearn import svm
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.neural_network import MLPRegressor
+from sklearn.preprocessing import StandardScaler
+from functools import reduce
+from numpy import mean
+import pickle
+from metrics import Evaluation
+
+"""
+force run all rules: snakemake -F -s Snakefile 
+run: snakemake -s Snakefile
+"""
+
+# fair comparison between different models, different datasets to different models
+# mean and combi models using dataset with Scr and Cysc both availabel 
+# ANALYSIS_PATH="/mnt/c/Users/u0155664/OneDrive - KU Leuven/phd/1_projects/gfrprediction2.0/analysis/adj_evaluation"
+
+eval = Evaluation()
+rule all:
+    input:
+        os.path.join(config.ANALYSIS_PATH, "data_cleaned.csv"),
+        os.path.join(config.ANALYSIS_PATH, "src_internal_validation.csv"),
+        os.path.join(config.ANALYSIS_PATH, "src_external_validation.csv"),
+        os.path.join(config.ANALYSIS_PATH, "cysc_internal_validation.csv"),
+        os.path.join(config.ANALYSIS_PATH, "cysc_external_validation.csv"),
+        os.path.join(config.ANALYSIS_PATH, "combi_internal_validation.csv"),
+        os.path.join(config.ANALYSIS_PATH, "combi_external_validation.csv"),
+        os.path.join(config.ANALYSIS_PATH, "data25_calulations_predictions.csv"),
+        os.path.join(config.ANALYSIS_PATH, "int_age.csv"),
+        os.path.join(config.ANALYSIS_PATH, "ext_age.csv"),
+        os.path.join(config.ANALYSIS_PATH, "int_mGFR.csv"),
+        os.path.join(config.ANALYSIS_PATH, "ext_mGFR.csv"),
+        # os.path.join(config.ANALYSIS_PATH, "combi_model_age.pkl"),
+        os.path.join(config.ANALYSIS_PATH, "data_gfrcal.csv"),
+        os.path.join(config.ANALYSIS_PATH, "scr_rf_per_on_data_cysc.csv"),
+
+
+rule process_data:
+    input:
+        data=os.path.join(config.DATA_PATH, "data.csv"),
+    output:
+        # processed_data=os.path.join(config.ANALYSIS_PATH, "data25.csv"),
+        processed_data_all=os.path.join(config.ANALYSIS_PATH, "data_cleaned.csv"),
+    run:
+        data=pd.read_csv(input.data)
+        # add categories based on mGFR
+        bins=[0, 90, 120, np.inf]
+        data.loc[:,'mGFR_cat']=pd.cut(data['mGFR'], bins, right=False)
+
+        # exclusion criteria 
+
+        data=data[data['mGFR']<=200]
+
+        # exclude repeats based on PatID
+
+        data=data.drop_duplicates(subset=['PatID'], keep='first')
+
+        # exclude patients SourceX == 'CRIC'
+        data=data[data['SourceX']!='CRIC']
+
+        # add categories based on age
+        bins=[1, 6, 12, 18, 25]
+        data.loc[:,'AGE_cat']=pd.cut(data['AGE'], bins, right=True)
+
+
+        data.to_csv(output.processed_data_all, index=False)
+
+
+rule get_other_gfrCalcuations:
+    input:
+        data=os.path.join(config.ANALYSIS_PATH, "data_cleaned.csv"),
+    output:
+        data25=os.path.join(config.ANALYSIS_PATH, "data25_gfrcal.csv"),
+        data_full=os.path.join(config.ANALYSIS_PATH, "data_gfrcal.csv"),
+    run:
+        data = pd.read_csv(input.data)
+        # Create new columns by applying the scalar functions row-by-row:
+        data['FAScrea'] = data.apply(lambda row: GfrCalculator.FAScrea(row['AGE'], row['SEX'], row['Scr']), axis=1)
+        data['FAScreaHt'] = data.apply(lambda row: GfrCalculator.FAScreaHt(row['AGE'], row['SEX'], row['Ht'], row['Scr']), axis=1)
+        data['FAScysc']=data.apply(lambda row: GfrCalculator.FAScysc(row['AGE'], row['CYSC']), axis=1)
+        
+        # used both Scr adn CysC
+        data['FAScombi'] = data.apply(lambda row: GfrCalculator.FAScombi(row['AGE'], row['SEX'], row['Scr'], row['CYSC']), axis=1)
+        data['FAScombiHt'] = data.apply(lambda row: GfrCalculator.FAScombiHt(row['AGE'], row['SEX'], row['Ht'], row['Scr'], row['CYSC']), axis=1)
+        data['FAS_aveg']=data[['FAScrea', 'FAScysc']].mean(axis=1)
+
+        data['EKFC_Crea'] = data.apply(lambda row: GfrCalculator.EKFC_Crea(row['AGE'], row['SEX'], row['Scr']), axis=1)
+        data['EKFC_CysC'] = data.apply(lambda row: GfrCalculator.EKFC_CysC(row['AGE'], row['CYSC']), axis=1)
+        data['EKFCcombi']=data[['EKFC_Crea', 'EKFC_CysC']].mean(axis=1)
+
+
+        data['CKiDU25Crea'] = data.apply(lambda row: GfrCalculator.CKiDU25Crea(row['Scr'], row['AGE'], row['Ht'], row['SEX']), axis=1)
+        data['CKiDU25CysC'] = data.apply(lambda row: GfrCalculator.CKiDU25CysC(row['CYSC'], row['AGE'], row['SEX']), axis=1)
+        data['CKiDU25combi'] = data[['CKiDU25Crea','CKiDU25CysC']].mean(axis=1)
+
+        data['Avg_equations']=data[['FAScrea','FAScreaHt','FAScysc','EKFC_Crea','EKFC_CysC','CKiDU25Crea','CKiDU25CysC','EKFCcombi', 'CKiDU25combi', 'FAScombi', 'FAScombiHt']].mean(axis=1)
+        # save the results
+        data.to_csv(output.data_full, index=False)
+        data25=data[data['AGE']<=25]
+        data25.to_csv(output.data25, index=False)
+
+rule prepare_data:
+    input:
+        data = os.path.join(config.ANALYSIS_PATH, "data25_gfrcal.csv"),
+        data_all=os.path.join(config.ANALYSIS_PATH, "data_gfrcal.csv")
+    output:
+        src_model_data=os.path.join(config.ANALYSIS_PATH, "src_model_data.pkl"),
+        cysc_model_data=os.path.join(config.ANALYSIS_PATH, "cysc_model_data.pkl"),
+        combi_model_data=os.path.join(config.ANALYSIS_PATH, "combi_model_data.pkl")
+    run:
+        data=pd.read_csv(input.data)
+        data_all=pd.read_csv(input.data_all)
+
+        data = pd.get_dummies(data, columns=['SEX'], drop_first=True)
+        data_all = pd.get_dummies(data_all, columns=['SEX'], drop_first=True)
+
+        # print(data.columns)
+        baselines=['FAScrea', 'FAScreaHt','FAScysc', 'FAS_aveg','FAScombi', 'FAScombiHt', 'EKFC_Crea', 'EKFC_CysC', 'EKFCcombi', 'CKiDU25Crea', 'CKiDU25CysC', 'CKiDU25combi']
+        features=[feature for feature in config.FEATURES_USED if feature!='CYSC']
+        data_src=data.dropna(subset=features)
+        data_full_scr=data_all.dropna(subset=features)
+        development=data_src[data_src['dataset']=='dev']
+        int_val=data_src[data_src['dataset']=='int_val']
+        ext_val=data_src[data_src['dataset']=='ext_val']
+
+        development_full=data_full_scr[data_full_scr['dataset']=='dev']
+        int_val_full=data_full_scr[data_full_scr['dataset']=='int_val']
+        ext_val_full=data_full_scr[data_full_scr['dataset']=='ext_val']
+        X_dev=development[features]
+        X_dev_full=development_full[features]
+        X_int_val=int_val[features]
+        X_ext_val=ext_val[features]
+        y_dev=development[config.LABEL]
+        y_dev_full=development_full[config.LABEL]
+        y_int_val=int_val[config.LABEL]
+        y_ext_val=ext_val[config.LABEL]
+        y_int_baseline=int_val[baselines]
+        y_ext_baseline=ext_val[baselines]   
+
+        features_cysc=[feature for feature in config.FEATURES_USED if feature!='Scr']
+        data_cysc=data.dropna(subset=features_cysc)
+        data_full_cysc=data_all.dropna(subset=features_cysc)
+        development=data_cysc[data_cysc['dataset']=='dev']
+        development_full=data_full_cysc[data_full_cysc['dataset']=='dev']
+        int_val=data_cysc[data_cysc['dataset']=='int_val']
+        ext_val=data_cysc[data_cysc['dataset']=='ext_val']
+        X_dev_cysc=development[features_cysc]
+        X_dev_full_cysc=development_full[features_cysc]
+        X_int_val_cysc=int_val[features_cysc]
+        X_ext_val_cysc=ext_val[features_cysc]
+        y_dev_cysc=development[config.LABEL]
+        y_dev_full_cysc=development_full[config.LABEL]
+        y_int_val_cysc=int_val[config.LABEL]
+        y_ext_val_cysc=ext_val[config.LABEL]
+        y_int_baseline_cysc=int_val[baselines]
+        y_ext_baseline_cysc=ext_val[baselines]
+
+        features=config.FEATURES_USED
+        data=data.dropna(subset=features)
+        data_all=data_all.dropna(subset=features)
+        development=data[data['dataset']=='dev']
+        development_full=data_all[data_all['dataset']=='dev']
+        int_val=data[data['dataset']=='int_val']
+        ext_val=data[data['dataset']=='ext_val']
+
+        X_dev_combi=development[features]
+        X_dev_full_combi=development_full[features]
+        X_int_val_combi=int_val[features]
+        X_ext_val_combi=ext_val[features]
+        y_dev_combi=development[config.LABEL]
+        y_dev_full_combi=development_full[config.LABEL]
+        y_int_val_combi=int_val[config.LABEL]
+        y_ext_val_combi=ext_val[config.LABEL]
+        y_int_baseline_combi=int_val[baselines]
+        y_ext_baseline_combi=ext_val[baselines]
+
+
+
+        # save data in two dictionaries
+        scr_model_data={
+            'X_dev': X_dev,
+            'X_int_val': X_int_val,
+            'X_ext_val': X_ext_val,
+            'y_dev': y_dev,
+            'y_int_val': y_int_val,
+            'y_ext_val': y_ext_val,
+            'y_int_baseline': y_int_baseline,
+            'y_ext_baseline': y_ext_baseline,
+            'X_dev_full': X_dev_full,
+            'y_dev_full': y_dev_full,
+        }
+
+        cysc_model_data={
+            'X_dev': X_dev_cysc,
+            'X_int_val': X_int_val_cysc,
+            'X_ext_val': X_ext_val_cysc,
+            'y_dev': y_dev_cysc,
+            'y_int_val': y_int_val_cysc,
+            'y_ext_val': y_ext_val_cysc,
+            'y_int_baseline': y_int_baseline_cysc,
+            'y_ext_baseline': y_ext_baseline_cysc,
+            'X_dev_full': X_dev_full_cysc,
+            'y_dev_full': y_dev_full_cysc,
+        }
+
+        combi_model_data={
+            'X_dev': X_dev_combi,
+            'X_int_val': X_int_val_combi,
+            'X_ext_val': X_ext_val_combi,
+            'y_dev': y_dev_combi,
+            'y_int_val': y_int_val_combi,
+            'y_ext_val': y_ext_val_combi,
+            'y_int_baseline': y_int_baseline_combi,
+            'y_ext_baseline': y_ext_baseline_combi,
+            'X_dev_full': X_dev_full_combi,
+            'y_dev_full': y_dev_full_combi
+        }
+        # save data
+        pickle.dump(scr_model_data, open(output.src_model_data, 'wb'))
+        pickle.dump(cysc_model_data, open(output.cysc_model_data, 'wb'))
+        pickle.dump(combi_model_data, open(output.combi_model_data, 'wb'))
+
+
+rule train_models:
+    input:
+        src_model_data = os.path.join(config.ANALYSIS_PATH, "src_model_data.pkl"),
+        cysc_model_data = os.path.join(config.ANALYSIS_PATH, "cysc_model_data.pkl"),
+        combi_model_data = os.path.join(config.ANALYSIS_PATH, "combi_model_data.pkl"),
+    output:
+        src_models = os.path.join(config.ANALYSIS_PATH, "src_models.pkl"),
+        cysc_models =os.path.join(config.ANALYSIS_PATH, "cysc_models.pkl"),
+        combi_models = os.path.join(config.ANALYSIS_PATH,"combi_models.pkl")
+    run:
+        # load data
+        src_model_data = pickle.load(open(input.src_model_data, "rb"))
+        cysc_model_data = pickle.load(open(input.cysc_model_data, "rb"))
+        combi_model_data = pickle.load(open(input.combi_model_data, "rb"))
+
+        def run_models(dict):
+            X_dev = dict['X_dev']
+            y_dev = dict['y_dev']
+            X_dev_full = dict['X_dev_full']
+            y_dev_full = dict['y_dev_full']
+            rf=RandomForestRegressor(random_state=0)
+            rf.fit(X_dev, y_dev)
+
+            rf_full=RandomForestRegressor(random_state=0)
+            rf_full.fit(X_dev_full, y_dev_full)
+            # lasso           
+            reg_lasso=linear_model.Lasso(random_state=0)
+            reg_lasso.fit(X_dev, y_dev)
+            # ridge
+            reg_ridge=linear_model.Ridge(random_state=0)
+            reg_ridge.fit(X_dev, y_dev)
+            # XGboost
+            xgb_model = xgb.XGBRegressor(objective="reg:linear", random_state=42)
+            xgb_model.fit(X_dev, y_dev)
+            # SVM
+            sv_model = svm.SVR(kernel='linear')
+            sv_model.fit(X_dev, y_dev)
+            # knn
+            knn_model = KNeighborsRegressor(n_neighbors=5)
+            knn_model.fit(X_dev, y_dev)
+            # mlp
+            mlp_model = MLPRegressor(random_state=0)
+            mlp_model.fit(X_dev, y_dev)
+
+            models = {
+                'rf': rf,
+                'rf_all': rf_full,
+                'reg_lasso': reg_lasso,
+                'reg_ridge': reg_ridge,
+                'xgb_model': xgb_model,
+                'sv_model': sv_model,
+                'knn_model': knn_model,
+                'mlp_model': mlp_model
+            }
+
+            return models
+    
+        # Src model
+        src_models = run_models(src_model_data)
+        # save the model
+        pickle.dump(src_models, open(output.src_models, 'wb'))
+
+        # CYSC model
+        cysc_models = run_models(cysc_model_data)
+        pickle.dump(cysc_models, open(output.cysc_models, 'wb'))
+
+        # combi model
+        combi_models = run_models(combi_model_data)
+        pickle.dump(combi_models, open(output.combi_models, 'wb'))
+    
+
+
+rule validation_internal:
+    input:
+        src_models = os.path.join(config.ANALYSIS_PATH, "src_models.pkl"),
+        cysc_models = os.path.join(config.ANALYSIS_PATH, "cysc_models.pkl"),
+        combi_models = os.path.join(config.ANALYSIS_PATH,"combi_models.pkl"),
+        src_model_data = os.path.join(config.ANALYSIS_PATH, "src_model_data.pkl"),
+        cysc_model_data = os.path.join(config.ANALYSIS_PATH, "cysc_model_data.pkl"),
+        combi_model_data = os.path.join(config.ANALYSIS_PATH, "combi_model_data.pkl")
+    output:
+        src_int=os.path.join(config.ANALYSIS_PATH, "src_internal_validation.csv"),
+        # src_ext=os.path.join(config.ANALYSIS_PATH, "src_external_validation.csv"),
+        cysc_int=os.path.join(config.ANALYSIS_PATH, "cysc_internal_validation.csv"),
+        # cysc_ext=os.path.join(config.ANALYSIS_PATH, "cysc_external_validation.csv"),
+        combi_int=os.path.join(config.ANALYSIS_PATH, "combi_internal_validation.csv"),
+        # combi_ext=os.path.join(config.ANALYSIS_PATH, "combi_external_validation.csv")
+    run:
+        def validate(data_dict, models_dict,data, model):
+            # data: data options: internal, external
+            # model: model options: src, cysc, combi
+            rf_model=models_dict['rf']
+            rf_full_model=models_dict['rf_all']
+            reg_lasso=models_dict['reg_lasso']
+            reg_ridge=models_dict['reg_ridge']
+            xgb_model=models_dict['xgb_model']
+            sv_model=models_dict['sv_model']
+            knn_model=models_dict['knn_model']
+            mlp_model=models_dict['mlp_model']
+
+            X_val = data_dict['X_int_val']
+            y_val = data_dict['y_int_val']
+            y_base_line = data_dict['y_int_baseline']
+
+            # get the predictions
+            rf_pred=rf_model.predict(X_val)
+            rf_full_pred=rf_full_model.predict(X_val)
+            reg_lasso_pred=reg_lasso.predict(X_val)
+            reg_ridge_pred=reg_ridge.predict(X_val)
+            xgb_pred=xgb_model.predict(X_val)
+            sv_pred=sv_model.predict(X_val)
+            knn_pred=knn_model.predict(X_val)
+            mlp_pred=mlp_model.predict(X_val)
+
+            # even there is no nan values, if indexes not match, substraction can be nan
+            y_val=y_val.reset_index(drop=True)
+            # get the baseline calculations
+            if model=='src':
+                FAScrea_cal=y_base_line['FAScrea'].reset_index(drop=True)
+                # print(FAScrea_cal.head())
+                FAScrea_results=eval.evaluate(FAScrea_cal, y_val).rename(f'FAScrea_{data}')
+                FAScreaHt_cal=y_base_line['FAScreaHt'].reset_index(drop=True)
+                FAScreaHt_results=eval.evaluate(FAScreaHt_cal, y_val).rename(f'FAScreaHt_{data}')
+                EKFC_Crea_cal=y_base_line['EKFC_Crea'].reset_index(drop=True)
+                EKFC_Crea_results=eval.evaluate(EKFC_Crea_cal, y_val).rename(f'EKFC_Crea_{data}')
+                CKiDU25Crea_cal=y_base_line['CKiDU25Crea'].reset_index(drop=True)
+                CKiDU25Crea_result=eval.evaluate(CKiDU25Crea_cal, y_val).rename(f'CKiDU25Crea_{data}')
+                baseline_evals=pd.concat([FAScrea_results, FAScreaHt_results, EKFC_Crea_results, CKiDU25Crea_result], axis=1)
+            elif model=='cysc':
+                FAScysc_cal=y_base_line['FAScysc'].reset_index(drop=True)
+                FAScysc_results=eval.evaluate(FAScysc_cal, y_val).rename(f'FAScysc_{data}')
+                EKFC_CysC_cal=y_base_line['EKFC_CysC'].reset_index(drop=True)
+                EKFC_CysC_results=eval.evaluate(EKFC_CysC_cal, y_val).rename(f'EKFC_CysC_{data}')
+                CKiDU25CysC_cal=y_base_line['CKiDU25CysC'].reset_index(drop=True)
+                CKiDU25CysC_results=eval.evaluate(CKiDU25CysC_cal, y_val).rename(f'CKiDU25CysC_{data}')
+                baseline_evals=pd.concat([FAScysc_results, EKFC_CysC_results, CKiDU25CysC_results], axis=1)
+
+            elif model=='combi':    
+                FAScombi_cal=y_base_line['FAScombi'].reset_index(drop=True)
+                FAScombi_results=eval.evaluate(FAScombi_cal, y_val).rename(f'FAScombi_{data}')
+                FAScombiHt_cal=y_base_line['FAScombiHt'].reset_index(drop=True)
+                FAScombiHt_results=eval.evaluate(FAScombiHt_cal, y_val).rename(f'FAScombiHt_{data}')
+                FAS_aveg_cal=y_base_line['FAS_aveg'].reset_index(drop=True)
+                FAS_aveg_results=eval.evaluate(FAS_aveg_cal, y_val).rename(f'FAS_aveg_{data}')
+                EKFC_Combi_cal=y_base_line['EKFCcombi'].reset_index(drop=True)
+                # print(EKFC_Combi_cal.head())
+                EKFC_Combi_results=eval.evaluate(EKFC_Combi_cal, y_val).rename(f'EKFC_Combi_{data}')
+                CKiDU25Combi_cal=y_base_line['CKiDU25combi'].reset_index(drop=True)
+                CKiDU25Combi_results=eval.evaluate(CKiDU25Combi_cal, y_val).rename(f'CKiDU25Combi_{data}')
+                baseline_evals=pd.concat([FAScombi_results, FAScombiHt_results,FAS_aveg_results, EKFC_Combi_results,  CKiDU25Combi_results], axis=1)
+            # get the results
+            rf_results=eval.evaluate(rf_pred, y_val).rename(f'rf_{data}')
+            rf_full_results=eval.evaluate(rf_full_pred, y_val).rename(f'rf_full_{data}')
+            reg_lasso_results=eval.evaluate(reg_lasso_pred, y_val).rename(f'reg_lasso_{data}')
+            reg_ridge_results=eval.evaluate(reg_ridge_pred, y_val).rename(f'reg_ridge_{data}')
+            xgb_results=eval.evaluate(xgb_pred, y_val).rename(f'xgb_{data}')
+            sv_results=eval.evaluate(sv_pred, y_val).rename(f'sv_{data}')
+            knn_results=eval.evaluate(knn_pred, y_val).rename(f'knn_{data}')
+            mlp_results=eval.evaluate(mlp_pred, y_val).rename(f'mlp_{data}')
+            # combine the results
+            results=pd.concat([rf_results, rf_full_results, reg_lasso_results, reg_ridge_results, xgb_results, sv_results, knn_results, mlp_results, baseline_evals], axis=1)
+            # print(results.head())
+            return results
+
+        src_model=pickle.load(open(input.src_models, "rb"))
+        cysc_model=pickle.load(open(input.cysc_models, "rb"))
+        combi_model=pickle.load(open(input.combi_models, "rb"))
+        src_model_data=pickle.load(open(input.src_model_data, "rb"))
+        cysc_model_data=pickle.load(open(input.cysc_model_data, "rb"))
+        combi_model_data=pickle.load(open(input.combi_model_data, "rb"))
+
+        src_results_int=validate(src_model_data, src_model, data='internal', model='src')
+        cysc_results_int=validate(cysc_model_data, cysc_model, data='internal', model='cysc')
+        combi_results_int=validate(combi_model_data, combi_model, data='internal', model='combi')
+
+
+        src_results_int.to_csv(output.src_int)
+        cysc_results_int.to_csv(output.cysc_int)
+        combi_results_int.to_csv(output.combi_int)
+
+rule validation_external:
+    input:
+        src_models = os.path.join(config.ANALYSIS_PATH, "src_models.pkl"),
+        cysc_models = os.path.join(config.ANALYSIS_PATH, "cysc_models.pkl"),
+        combi_models = os.path.join(config.ANALYSIS_PATH,"combi_models.pkl"),
+        src_model_data = os.path.join(config.ANALYSIS_PATH, "src_model_data.pkl"),
+        cysc_model_data = os.path.join(config.ANALYSIS_PATH, "cysc_model_data.pkl"),
+        combi_model_data = os.path.join(config.ANALYSIS_PATH, "combi_model_data.pkl")
+    output:
+        src_ext=os.path.join(config.ANALYSIS_PATH, "src_external_validation.csv"),
+        cysc_ext=os.path.join(config.ANALYSIS_PATH, "cysc_external_validation.csv"),
+        combi_ext=os.path.join(config.ANALYSIS_PATH, "combi_external_validation.csv")
+    run:
+        def validate(data_dict, models_dict,data, model):
+            # data: data options: internal, external
+            # model: model options: src, cysc, combi
+            rf_model=models_dict['rf']
+            rf_full_model=models_dict['rf_all']
+            X_dev=data_dict['X_dev']
+            X_dev_full=data_dict['X_dev_full']
+            X_int_val=data_dict['X_int_val']
+            y_dev=data_dict['y_dev']
+            y_dev_full=data_dict['y_dev_full']
+            y_int_val=data_dict['y_int_val']
+            y_train_final=pd.concat([y_dev, y_int_val], axis=0)
+            y_train_full_final=pd.concat([y_dev_full, y_int_val], axis=0)
+            X_train_final=pd.concat([X_dev, X_int_val], axis=0)
+            X_train_full_final=pd.concat([X_dev_full, X_int_val], axis=0)
+            rf_model.fit(X_train_final, y_train_final)
+            rf_full_model.fit(X_train_full_final, y_train_full_final)
+
+            models_dict['rf']=rf_model 
+            models_dict['rf_all']=rf_full_model
+
+            # save models 
+            pickle.dump(models_dict, open(os.path.join(config.ANALYSIS_PATH, f"{model}_models.pkl"), 'wb'))  
+
+            X_val = data_dict['X_ext_val']
+            y_val = data_dict['y_ext_val']
+            y_base_line = data_dict['y_ext_baseline']
+
+            # print(f"y_val: {y_val.isna().sum()}")
+
+            # get the predictions
+            rf_pred=rf_model.predict(X_val)
+            rf_full_pred=rf_full_model.predict(X_val)
+
+            # even there is no nan values, if indexes not match, substraction can be nan
+            y_val=y_val.reset_index(drop=True)
+            # get the baseline calculations
+            if model=='src':
+                FAScrea_cal=y_base_line['FAScrea'].reset_index(drop=True)
+                # print(FAScrea_cal.head())
+                FAScrea_results=eval.evaluate(FAScrea_cal, y_val).rename(f'FAScrea_{data}')
+                FAScreaHt_cal=y_base_line['FAScreaHt'].reset_index(drop=True)
+                FAScreaHt_results=eval.evaluate(FAScreaHt_cal, y_val).rename(f'FAScreaHt_{data}')
+                EKFC_Crea_cal=y_base_line['EKFC_Crea'].reset_index(drop=True)
+                EKFC_Crea_results=eval.evaluate(EKFC_Crea_cal, y_val).rename(f'EKFC_Crea_{data}')
+                CKiDU25Crea_cal=y_base_line['CKiDU25Crea'].reset_index(drop=True)
+                CKiDU25Crea_result=eval.evaluate(CKiDU25Crea_cal, y_val).rename(f'CKiDU25Crea_{data}')
+                baseline_evals=pd.concat([FAScrea_results, FAScreaHt_results, EKFC_Crea_results, CKiDU25Crea_result], axis=1)
+            elif model=='cysc':
+                FAScysc_cal=y_base_line['FAScysc'].reset_index(drop=True)
+                FAScysc_results=eval.evaluate(FAScysc_cal, y_val).rename(f'FAScysc_{data}')
+                EKFC_CysC_cal=y_base_line['EKFC_CysC'].reset_index(drop=True)
+                EKFC_CysC_results=eval.evaluate(EKFC_CysC_cal, y_val).rename(f'EKFC_CysC_{data}')
+                CKiDU25CysC_cal=y_base_line['CKiDU25CysC'].reset_index(drop=True)
+                CKiDU25CysC_results=eval.evaluate(CKiDU25CysC_cal, y_val).rename(f'CKiDU25CysC_{data}')
+                baseline_evals=pd.concat([FAScysc_results, EKFC_CysC_results, CKiDU25CysC_results], axis=1)
+
+            elif model=='combi':    
+                FAScombi_cal=y_base_line['FAScombi'].reset_index(drop=True)
+                FAScombi_results=eval.evaluate(FAScombi_cal, y_val).rename(f'FAScombi_{data}')
+                FAScombiHt_cal=y_base_line['FAScombiHt'].reset_index(drop=True)
+                FAScombiHt_results=eval.evaluate(FAScombiHt_cal, y_val).rename(f'FAScombiHt_{data}')
+                FAS_aveg_cal=y_base_line['FAS_aveg'].reset_index(drop=True)
+                FAS_aveg_results=eval.evaluate(FAS_aveg_cal, y_val).rename(f'FAS_aveg_{data}')
+                EKFC_Combi_cal=y_base_line['EKFCcombi'].reset_index(drop=True)
+                # print(EKFC_Combi_cal.head())
+                EKFC_Combi_results=eval.evaluate(EKFC_Combi_cal, y_val).rename(f'EKFC_Combi_{data}')
+                CKiDU25Combi_cal=y_base_line['CKiDU25combi'].reset_index(drop=True)
+                CKiDU25Combi_results=eval.evaluate(CKiDU25Combi_cal, y_val).rename(f'CKiDU25Combi_{data}')
+                baseline_evals=pd.concat([FAScombi_results, FAScombiHt_results,FAS_aveg_results, EKFC_Combi_results,  CKiDU25Combi_results], axis=1)
+            # get the results
+            rf_results=eval.evaluate(rf_pred, y_val).rename(f'rf_{data}')
+            rf_full_results=eval.evaluate(rf_full_pred, y_val).rename(f'rf_full_{data}')
+
+            # combine the results
+            results=pd.concat([rf_results, rf_full_results, baseline_evals], axis=1)
+            # print(results.head())
+            return results
+
+        src_model=pickle.load(open(input.src_models, "rb"))
+        cysc_model=pickle.load(open(input.cysc_models, "rb"))
+        combi_model=pickle.load(open(input.combi_models, "rb"))
+        src_model_data=pickle.load(open(input.src_model_data, "rb"))
+        cysc_model_data=pickle.load(open(input.cysc_model_data, "rb"))
+        combi_model_data=pickle.load(open(input.combi_model_data, "rb"))
+
+
+        src_results_ext=validate(src_model_data, src_model, data='external', model='src')
+        cysc_results_ext=validate(cysc_model_data, cysc_model, data='external', model='cysc')
+        combi_results_ext=validate(combi_model_data, combi_model, data='external', model='combi')
+
+
+        src_results_ext.to_csv(output.src_ext)
+        cysc_results_ext.to_csv(output.cysc_ext)
+        combi_results_ext.to_csv(output.combi_ext)
+        
+
+rule get_predictions:
+    input:
+        src_models = os.path.join(config.ANALYSIS_PATH, "src_models.pkl"),
+        cysc_models = os.path.join(config.ANALYSIS_PATH, "cysc_models.pkl"),
+        combi_models = os.path.join(config.ANALYSIS_PATH,"combi_models.pkl"),
+        data = os.path.join(config.ANALYSIS_PATH, "data25_gfrcal.csv")
+    output:
+        final_results = os.path.join(config.ANALYSIS_PATH, "data25_calulations_predictions.csv"),
+    run:
+        src_model=pickle.load(open(input.src_models, "rb"))
+        cysc_model=pickle.load(open(input.cysc_models, "rb"))
+        combi_model=pickle.load(open(input.combi_models, "rb"))
+        data = pd.read_csv(input.data)
+        data = pd.get_dummies(data, columns=['SEX'], drop_first=True)
+
+        features=[feature for feature in config.FEATURES_USED if feature!='CYSC']
+        features_cysc=[feature for feature in config.FEATURES_USED if feature!='Scr']
+
+        def run_model(models, data, model):
+            rf=models['rf']
+            rf_full=models['rf_all']
+            reg_lasso=models['reg_lasso']
+            reg_ridge=models['reg_ridge']
+            xgb_model=models['xgb_model']
+            sv_model=models['sv_model']
+            knn_model=models['knn_model']
+            mlp=models['mlp_model']
+            if model=='src':
+                X = data[features]
+            elif model=='cysc':
+                X = data[features_cysc]
+            elif model=='combi':
+                X = data[config.FEATURES_USED]
+            complete_mask = X.notnull().all(axis=1)
+            data.loc[complete_mask, f'rf_{model}'] = rf.predict(X.loc[complete_mask])
+            data.loc[complete_mask, f'rf_full_{model}'] = rf_full.predict(X.loc[complete_mask])
+            data.loc[complete_mask, f'reg_lasso_{model}'] = reg_lasso.predict(X.loc[complete_mask])
+            data.loc[complete_mask, f'reg_ridge_{model}'] = reg_ridge.predict(X.loc[complete_mask])
+            data.loc[complete_mask, f'xgb_{model}'] = xgb_model.predict(X.loc[complete_mask])
+            data.loc[complete_mask, f'sv_{model}'] = sv_model.predict(X.loc[complete_mask])
+            data.loc[complete_mask, f'knn_{model}'] = knn_model.predict(X.loc[complete_mask])
+            data.loc[complete_mask, f'mlp_{model}'] = mlp.predict(X.loc[complete_mask])
+            return data
+
+        data = run_model(src_model, data, 'src')
+        data = run_model(cysc_model, data, 'cysc')
+        data = run_model(combi_model, data, 'combi')
+        data['rf_mean'] = data[['rf_src', 'rf_cysc']].mean(axis=1, skipna=False)  # get the mean of predictions for src and cysc, skipna = False, NaN if one of them is NaN
+        data['rf_full_mean'] = data[['rf_full_src', 'rf_full_cysc']].mean(axis=1, skipna=False)  # get the mean of predictions for src and cysc, skipna = False, NaN if one of them is NaN
+
+        data.to_csv(output.final_results, index=False)
+
+rule evaluate_perfomance_cat:
+    input:
+        final_results = os.path.join(config.ANALYSIS_PATH, "data25_calulations_predictions.csv"),
+    output:
+        int_age = os.path.join(config.ANALYSIS_PATH, "int_age.csv"),
+        ext_age = os.path.join(config.ANALYSIS_PATH, "ext_age.csv"),
+        int_mGFR = os.path.join(config.ANALYSIS_PATH, "int_mGFR.csv"),
+        ext_mGFR = os.path.join(config.ANALYSIS_PATH, "ext_mGFR.csv"),
+        mean_eval=os.path.join(config.ANALYSIS_PATH, "mean_ext_int_validation.csv")
+    run:
+        data = pd.read_csv(input.final_results)
+        subsets = {}
+        for i in data['dataset'].dropna().unique():
+            subsets[i] = data[data['dataset'] == i]
+
+        def evaluate(subsets, cat, method):
+            # cat ['AGE_cat', 'mGFR_cat']
+            # method ['int', 'ext']
+            dat=subsets[method]
+            predictions=['rf_src','rf_cysc','rf_combi','rf_mean','rf_full_src','rf_full_cysc','rf_full_combi','CKiDU25Crea', 'CKiDU25CysC','CKiDU25combi', 'EKFC_Crea', 'EKFC_CysC', 'EKFCcombi', 'FAS_aveg', 'FAScombi', 'FAScombiHt', 'FAScrea', 'FAScreaHt', 'FAScysc']
+            eval_final={}
+            for i in predictions:
+                eval_results={}
+                for j in dat[cat].dropna().unique():
+                    mask = (dat[cat] == j) & (dat[i].notna())
+                    print(mask.sum())
+                    if mask.sum() > 3:
+                        pred= dat.loc[mask, i].reset_index(drop=True)
+                        # print(pred.isna().any())
+                        mGFR=dat.loc[mask, config.LABEL].reset_index(drop=True)
+                        cat_eval=eval.evaluate(pred, mGFR)
+                        eval_results[j]=cat_eval
+                eval_results = pd.concat(eval_results, axis=1)
+                eval_results = eval_results.T
+                eval_results = eval_results.rename(columns={0: i})
+                eval_final[i] = eval_results
+            eval_final = pd.concat(eval_final, axis=1)
+            return eval_final
+
+
+        int_age=evaluate(subsets, 'AGE_cat', 'int_val')
+        ext_age=evaluate(subsets, 'AGE_cat', 'ext_val')
+        int_mGFR=evaluate(subsets, 'mGFR_cat', 'int_val')
+        ext_mGFR=evaluate(subsets, 'mGFR_cat', 'ext_val')
+
+        data=data.dropna(subset=['rf_mean'])
+        mGFR_int=data.loc[data['dataset']=='int_val', config.LABEL].reset_index(drop=True)
+        mGFR_ext=data.loc[data['dataset']=='ext_val', config.LABEL].reset_index(drop=True)
+        rf_mean_int=data.loc[data['dataset']=='int_val', 'rf_mean'].reset_index(drop=True)
+        rf_mean_ext=data.loc[data['dataset']=='ext_val', 'rf_mean'].reset_index(drop=True)
+        rf_mean_full_int=data.loc[data['dataset']=='int_val', 'rf_full_mean'].reset_index(drop=True)
+        rf_mean_full_ext=data.loc[data['dataset']=='ext_val', 'rf_full_mean'].reset_index(drop=True)
+
+        rf_mean_int_eval=eval.evaluate(rf_mean_int, mGFR_int).rename('rf_mean_int')
+        rf_mean_full_int_eval=eval.evaluate(rf_mean_full_int, mGFR_int).rename('rf_mean_full_int')
+        rf_mean_ext_eval=eval.evaluate(rf_mean_ext, mGFR_ext).rename('rf_mean_ext')
+        rf_mean_full_ext_eval=eval.evaluate(rf_mean_full_ext, mGFR_ext).rename('rf_mean_full_ext')
+        results_mean_rf=pd.concat([rf_mean_int_eval, rf_mean_ext_eval, rf_mean_full_int_eval, rf_mean_full_ext_eval], axis=1)
+
+        results_mean_rf.to_csv(output.mean_eval, index=True)
+        int_age.to_csv(output.int_age)
+        ext_age.to_csv(output.ext_age)
+        int_mGFR.to_csv(output.int_mGFR)
+        ext_mGFR.to_csv(output.ext_mGFR)  
+
+rule supplementary_rf_scr_performance_on_data_cysc:
+    input:
+        data=os.path.join(config.ANALYSIS_PATH, "data25_calulations_predictions.csv"),
+    output:
+        scr_rf_per_on_data=os.path.join(config.ANALYSIS_PATH, "scr_rf_per_on_data_cysc.csv"),
+    run:
+        data=pd.read_csv(input.data)
+        data_ext=data[data['dataset']=='ext_val']
+        dat=data_ext[['rf_src', 'rf_cysc', 'mGFR', 'rf_full_src', 'EKFC_Crea']].dropna() 
+        rf_scr=dat['rf_src'].reset_index(drop=True)
+        rf_full_src=dat['rf_full_src'].reset_index(drop=True)
+        EKFC_Crea=dat['EKFC_Crea'].reset_index(drop=True)
+        mGFR=dat['mGFR'].reset_index(drop=True)
+
+        rf_scr_per=eval.evaluate(rf_scr, mGFR).rename('rf_src')
+        rf_full_src_per=eval.evaluate(rf_full_src, mGFR).rename('rf_full_src')
+        EKFC_Crea_per=eval.evaluate(EKFC_Crea, mGFR).rename('EKFC_Crea')
+
+        results=pd.concat([rf_scr_per, rf_full_src_per, EKFC_Crea_per], axis=1)
+        results.to_csv(output.scr_rf_per_on_data, index=True)
+
+
+        
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

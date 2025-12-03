@@ -1,0 +1,133 @@
+from gfrCalculator import GfrCalculator
+import os
+import config
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestRegressor
+from metrics import Evaluation
+from sklearn.linear_model import LinearRegression
+from sklearn import linear_model
+from sklearn.model_selection import GridSearchCV
+import xgboost as xgb
+from sklearn import svm
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.neural_network import MLPRegressor
+from functools import reduce
+from numpy import mean
+import pickle
+from metrics import Evaluation
+
+# resutls are not used
+# RF trained on dev+int_val, validated on ext_val
+# missing values in dev+int_val are allowed
+# missing values in ext_val are not allowed
+# RF model: combination model, SCr + CysC + demographics
+eval = Evaluation()
+rule all:
+    input:
+        os.path.join(config.ANALYSIS_PATH, "rf_results_ext_with_missing.csv"),
+
+rule prepare_data:
+    input:
+        data = os.path.join(config.ANALYSIS_PATH, "data25_gfrcal.csv"),
+        data_all=os.path.join(config.ANALYSIS_PATH, "data_cleaned.csv"),
+    output:
+        rf_model_data=os.path.join(config.ANALYSIS_PATH, "rf_model_data_missing.pkl"),
+    run:
+        data=pd.read_csv(input.data)
+        data_all=pd.read_csv(input.data_all)
+        data = pd.get_dummies(data, columns=['SEX'], drop_first=True)
+        data_all = pd.get_dummies(data_all, columns=['SEX'], drop_first=True)
+
+        baselines=['EKFCcombi']
+        features=config.FEATURES_USED
+        development=data[data['dataset'].isin (['dev', 'int_val'])]
+        development_full=data_all[data_all['dataset'].isin (['dev', 'int_val'])]
+        ext_val=data[data['dataset']=='ext_val'].dropna(subset=config.FEATURES_USED)
+
+        X_dev=development[features]
+        X_dev_full=development_full[features]
+        X_ext_val=ext_val[features]
+        y_dev=development[config.LABEL]
+        y_dev_full=development_full[config.LABEL]
+        y_ext_val=ext_val[config.LABEL]
+        y_ext_baseline=ext_val[baselines]  
+
+        rf_model_data={
+            'X_dev': X_dev,
+            'X_ext_val': X_ext_val,
+            'y_dev': y_dev,
+            'y_ext_val': y_ext_val,
+            'y_ext_baseline': y_ext_baseline,
+            'X_dev_full': X_dev_full,
+            'y_dev_full': y_dev_full,
+        }
+
+        pickle.dump(rf_model_data, open(output.rf_model_data, 'wb'))
+
+rule train_models:
+    input:
+        rf_model_data = os.path.join(config.ANALYSIS_PATH, "rf_model_data_missing.pkl"),
+    output:
+        rf_models=os.path.join(config.ANALYSIS_PATH, "rf_models_missing.pkl"),
+    run:
+        rf_model_data = pickle.load(open(input.rf_model_data, "rb"))
+
+        def run_models(dict):
+            X_dev = dict['X_dev']
+            y_dev = dict['y_dev']
+            X_dev_full = dict['X_dev_full']
+            y_dev_full = dict['y_dev_full']
+            rf=RandomForestRegressor(random_state=0)
+            rf.fit(X_dev, y_dev)
+
+            rf_full=RandomForestRegressor(random_state=0)
+            rf_full.fit(X_dev_full, y_dev_full)
+            
+            models = {
+                'rf': rf,
+                'rf_all': rf_full
+            }
+
+            return models
+        rf_models = run_models(rf_model_data)
+        pickle.dump(rf_models, open(output.rf_models, 'wb'))
+
+rule validate_models:
+    input:
+        rf_model_data = os.path.join(config.ANALYSIS_PATH, "rf_model_data_missing.pkl"),
+        rf_models = os.path.join(config.ANALYSIS_PATH, "rf_models_missing.pkl"),
+    output:
+        rf_results_ext=os.path.join(config.ANALYSIS_PATH, "rf_results_ext_with_missing.csv"),
+    run:
+        rf_model_data = pickle.load(open(input.rf_model_data, "rb"))
+        rf_models = pickle.load(open(input.rf_models, "rb"))
+
+        def validate(data_dict, models_dict, data):
+            X_val = data_dict['X_ext_val']
+            y_val = data_dict['y_ext_val']
+            y_base_line = data_dict['y_ext_baseline']
+            # print(f"y_val: {y_val.isna().sum()}")
+            rf=models_dict['rf']
+            rf_full=models_dict['rf_all']
+
+            # get the predictions
+            rf_pred=rf.predict(X_val)
+            rf_full_pred=rf_full.predict(X_val)
+
+            # even there is no nan values, if indexes not match, substraction can be nan
+            y_val=y_val.reset_index(drop=True)
+            # get the baseline calculations
+
+            # EKFC_Combi_cal=y_base_line['EKFCcombi'].reset_index(drop=True)
+            # EKFC_Combi_results=eval.evaluate(EKFC_Combi_cal, y_val).rename(f'EKFC_Combi_{data}')
+            rf_results=eval.evaluate(rf_pred, y_val).rename(f'rf_{data}')
+            rf_full_results=eval.evaluate(rf_full_pred, y_val).rename(f'rf_full_{data}')
+            results=pd.concat([rf_results, rf_full_results], axis=1)
+            return results
+
+        rf_results_ext=validate(rf_model_data, rf_models, 'external')
+        rf_results_ext.to_csv(output.rf_results_ext)
+
+
+
